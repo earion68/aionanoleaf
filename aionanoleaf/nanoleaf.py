@@ -31,6 +31,9 @@ from aiohttp import (
     ClientSession,
     ClientTimeout,
     ClientConnectionError,
+    ClientPayloadError,
+    ClientResponseError,
+    ContentTypeError,
 )
 
 from .events import (
@@ -239,7 +242,7 @@ class Nanoleaf:
 
     async def _request(
         self, method: str, path: str, data: dict | None = None
-    ) -> ClientResponse:
+    ) -> Any:
         """Make an authorized request to Nanoleaf with an auth_token."""
         url = f"{self._api_url}/{self.auth_token}/{path}"
         json_data = json.dumps(data)
@@ -259,6 +262,11 @@ class Nanoleaf:
 
         # did it work after retries?
         if err is not None:
+            # Important : if it is "bad status line" sur un PUT/POST verson PUT/POST to Nanoleaf,
+            # we can decide to not break the code.
+            if isinstance(err, ClientResponseError) and ("Expected HTTP" in str(err) or "Bad status line" in str(err)):
+                print("Warning: The API server reply was malformed but the command might have worked.")
+                return None
             # no. we had an error; perform desired error handling (converting
             # certain exceptions to Unavailable) and otherwise let it percolate
             # upward.
@@ -308,6 +316,21 @@ class Nanoleaf:
         self._firmware_version = data["firmwareVersion"]
         self._hardware_version = data.get("hardwareVersion")
         self._model = data["model"]
+
+        if "state" not in data.keys():
+            resp = await self._request("get", "state")
+            data["state"] = await resp.json()
+
+        if "effects" not in data.keys():
+            data["effects"] = dict()
+            resp = await self._request("get", "effects/effectsList")
+            data["effects"]["effectsList"] = await resp.json()
+            resp = await self._request("get", "effects/select")
+            data["effects"]["select"] = await resp.text()
+
+        if "panelLayout" in data.keys():
+            self._panels = {Panel(panel) for panel in data["panelLayout"]["layout"]["positionData"]}
+
         self._is_on = data["state"]["on"]["value"]
         self._brightness = data["state"]["brightness"]["value"]
         self._brightness_max = data["state"]["brightness"]["max"]
@@ -324,7 +347,6 @@ class Nanoleaf:
         self._color_mode = data["state"]["colorMode"]
         self._effects_list = data["effects"]["effectsList"]
         self._effect = data["effects"]["select"]
-        self._panels = {Panel(panel) for panel in data["panelLayout"]["layout"]["positionData"]}
         if self._model in EMERSION_MODELS:
             await self.get_emersion()
         
